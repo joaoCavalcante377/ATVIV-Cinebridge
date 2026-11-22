@@ -1,0 +1,4 @@
+# Finais de linha LF em todos os arquivos de texto, inclusive em checkouts no Windows:
+# os arquivos são copiados para imagens Linux e lidos pelo PostgreSQL/RabbitMQ.
+* text=auto eol=lf
+*.png binary

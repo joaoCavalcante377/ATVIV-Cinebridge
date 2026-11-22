@@ -1,0 +1,183 @@
+# Cinebridge containerizada (ATVIV): 4 microsserviços, 4 bancos PostgreSQL e RabbitMQ.
+#   docker compose up -d --build      (ou: docker-compose up -d --build)
+#   docker compose ps                 situação e healthchecks
+#   docker compose logs -f            logs de todos os contêineres
+# Portas dos bancos e do AMQP ficam restritas a 127.0.0.1; troque-as com as variáveis *_PORTA
+# (por exemplo, em um arquivo .env ao lado deste) se já houver um PostgreSQL local na 5432.
+name: cinebridge
+
+x-postgres: &postgres
+  image: postgres:15-alpine
+  restart: unless-stopped
+  networks: [cinebridge-net]
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U cinebridge -d $${POSTGRES_DB}"]
+    interval: 5s
+    timeout: 3s
+    retries: 12
+
+x-postgres-env: &postgres-env
+  POSTGRES_USER: cinebridge
+  POSTGRES_PASSWORD: cinebridge
+
+x-servico: &servico
+  restart: unless-stopped
+  networks: [cinebridge-net]
+  init: true
+
+services:
+  # Barramento de mensagens. Interface de gerenciamento: http://localhost:15672 (guest/guest)
+  cinebridge-mq:
+    image: rabbitmq:3-management-alpine
+    container_name: cinebridge-mq
+    # O nome do nó do RabbitMQ deriva do hostname; fixá-lo mantém os dados do volume entre recriações.
+    hostname: cinebridge-mq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    ports:
+      - "127.0.0.1:${MQ_PORTA:-5672}:5672"
+      - "${MQ_GERENCIAMENTO_PORTA:-15672}:15672"
+    volumes:
+      - mq-dados:/var/lib/rabbitmq
+    networks: [cinebridge-net]
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  profissionais-db:
+    <<: *postgres
+    container_name: profissionais-db
+    environment:
+      <<: *postgres-env
+      POSTGRES_DB: profissionais
+    ports:
+      - "127.0.0.1:${PROFISSIONAIS_DB_PORTA:-5432}:5432"
+    volumes:
+      - profissionais-dados:/var/lib/postgresql/data
+
+  projetos-db:
+    <<: *postgres
+    container_name: projetos-db
+    environment:
+      <<: *postgres-env
+      POSTGRES_DB: projetos
+    ports:
+      - "127.0.0.1:${PROJETOS_DB_PORTA:-5433}:5432"
+    volumes:
+      - projetos-dados:/var/lib/postgresql/data
+
+  recomendacoes-db:
+    <<: *postgres
+    container_name: recomendacoes-db
+    environment:
+      <<: *postgres-env
+      POSTGRES_DB: recomendacoes
+    ports:
+      - "127.0.0.1:${RECOMENDACOES_DB_PORTA:-5434}:5432"
+    volumes:
+      - recomendacoes-dados:/var/lib/postgresql/data
+
+  notificacoes-db:
+    <<: *postgres
+    container_name: notificacoes-db
+    environment:
+      <<: *postgres-env
+      POSTGRES_DB: notificacoes
+    ports:
+      - "127.0.0.1:${NOTIFICACOES_DB_PORTA:-5435}:5432"
+    volumes:
+      - notificacoes-dados:/var/lib/postgresql/data
+
+  # Recomendação e orquestração: ponto de entrada REST da plataforma.
+  cinebridge-api:
+    <<: *servico
+    build: ./services/api
+    image: cinebridge/api:4.0.0
+    container_name: cinebridge-api
+    env_file: ./services/api/docker.env
+    ports:
+      - "${API_PORTA:-3000}:3000"
+    volumes:
+      - api-arquivos:/usr/src/app/.local
+    depends_on:
+      recomendacoes-db: { condition: service_healthy }
+      cinebridge-mq: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  cinebridge-profissionais:
+    <<: *servico
+    build: ./services/profissionais
+    image: cinebridge/profissionais:4.0.0
+    container_name: cinebridge-profissionais
+    env_file: ./services/profissionais/docker.env
+    ports:
+      - "${PROFISSIONAIS_PORTA:-3001}:3001"
+    depends_on:
+      profissionais-db: { condition: service_healthy }
+      cinebridge-mq: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+  cinebridge-projetos:
+    <<: *servico
+    build: ./services/projetos
+    image: cinebridge/projetos:4.0.0
+    container_name: cinebridge-projetos
+    env_file: ./services/projetos/docker.env
+    ports:
+      - "${PROJETOS_PORTA:-3002}:3002"
+    depends_on:
+      projetos-db: { condition: service_healthy }
+      cinebridge-mq: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3002/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+  cinebridge-notificacoes:
+    <<: *servico
+    build: ./services/notificacoes
+    image: cinebridge/notificacoes:4.0.0
+    container_name: cinebridge-notificacoes
+    env_file: ./services/notificacoes/docker.env
+    ports:
+      - "${NOTIFICACOES_PORTA:-3003}:3003"
+    depends_on:
+      notificacoes-db: { condition: service_healthy }
+      cinebridge-mq: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3003/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+networks:
+  # Rede interna do tipo bridge: os contêineres se encontram pelo nome do serviço.
+  cinebridge-net:
+    name: cinebridge-net
+    driver: bridge
+
+volumes:
+  mq-dados:
+  profissionais-dados:
+  projetos-dados:
+  recomendacoes-dados:
+  notificacoes-dados:
+  api-arquivos:

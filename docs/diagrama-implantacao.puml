@@ -1,0 +1,65 @@
+@startuml cinebridge-implantacao
+' Diagrama de implantação da ATVIV (mesma estrutura do diagrama do enunciado).
+' Filas: consulta-profissionais e consulta-projetos (RPC, resposta na fila de retorno do solicitante),
+' eventos-recomendacoes (api → projetos) e eventos-projetos (projetos → notificações).
+skinparam componentStyle uml2
+skinparam shadowing false
+top to bottom direction
+
+package "rede cinebridge-net (bridge)" {
+
+  component "cinebridge-api" as api {
+    rectangle "Porta: 3000" as api_porta
+    rectangle "Recomendação" as api_rec
+  }
+  component "cinebridge-projetos" as projetos {
+    rectangle "Porta: 3002" as proj_porta
+    rectangle "Gestão de Projetos" as proj_gestao
+  }
+  component "cinebridge-profissionais" as profissionais {
+    rectangle "Porta: 3001" as prof_porta
+    rectangle "Gestão de Profissionais" as prof_gestao
+  }
+  component "cinebridge-notificacoes" as notificacoes {
+    rectangle "Porta: 3003" as not_porta
+    rectangle "Envio de Notificações" as not_envio
+  }
+  component "RabbitMQ (cinebridge-mq)" as mq {
+    rectangle "Portas: 5672, 15672" as mq_porta
+    rectangle "Barramento de Mensagens" as mq_bus
+  }
+
+  database "recomendacoes-db" as recdb {
+    rectangle "Porta: 5434" as recdb_porta
+    rectangle "PostgreSQL" as recdb_pg
+  }
+  database "projetos-db" as projdb {
+    rectangle "Porta: 5433" as projdb_porta
+    rectangle "PostgreSQL" as projdb_pg
+  }
+  database "profissionais-db" as profdb {
+    rectangle "Porta: 5432" as profdb_porta
+    rectangle "PostgreSQL" as profdb_pg
+  }
+  database "notificacoes-db" as notdb {
+    rectangle "Porta: 5435" as notdb_porta
+    rectangle "PostgreSQL" as notdb_pg
+  }
+}
+
+api_rec ..> proj_gestao : Consulta indireta via MQ\n(consulta-projetos, eventos-recomendacoes)
+api_rec ..> prof_gestao : Consulta indireta via MQ\n(consulta-profissionais)
+proj_gestao ..> not_envio : Dispara notificações via MQ\n(eventos-projetos)
+
+api_rec --> mq_bus : Publica mensagens
+api_rec --> mq_bus : Consome respostas
+proj_gestao --> mq_bus : Publica eventos
+prof_gestao --> mq_bus : Publica respostas
+prof_gestao --> mq_bus : Consome consultas
+not_envio --> mq_bus : Consome eventos
+
+api_rec --> recdb_pg : Persiste recomendações
+proj_gestao --> projdb_pg : Persiste projetos
+prof_gestao --> profdb_pg : Persiste profissionais
+not_envio --> notdb_pg : Persiste notificações
+@enduml

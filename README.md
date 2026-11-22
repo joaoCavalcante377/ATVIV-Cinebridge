@@ -1,395 +1,212 @@
-# ATVIII — Cinebridge
+# ATVIV — Cinebridge
 
-API para recomendar profissionais e formar equipes de projetos audiovisuais. Continuação da [ATVII-Cinebridge](https://github.com/joaoCavalcante377/ATVII-Cinebridge), que por sua vez continua a [ATVI-Cinebridge](https://github.com/joaoCavalcante377/ATVI-Cinebridge).
+Plataforma para recomendar profissionais e formar equipes de projetos audiovisuais, agora **containerizada** e dividida em microsserviços que se comunicam por **RabbitMQ**. Continuação da [ATVIII-Cinebridge](https://github.com/joaoCavalcante377/ATVIII-Cinebridge), que continua a [ATVII](https://github.com/joaoCavalcante377/ATVII-Cinebridge) e a [ATVI](https://github.com/joaoCavalcante377/ATVI-Cinebridge).
 
-A ATVIII analisa anti-padrões do código anterior e introduz três padrões estruturais:
+| Contêiner | Porta | Função | Banco |
+|---|---|---|---|
+| `cinebridge-api` | 3000 | Recomendação e orquestração; ponto de entrada REST | `recomendacoes-db` (5434) |
+| `cinebridge-profissionais` | 3001 | Cadastro, competências, avaliações e disponibilidade | `profissionais-db` (5432) |
+| `cinebridge-projetos` | 3002 | Ciclo de vida, métricas e resultados dos projetos | `projetos-db` (5433) |
+| `cinebridge-notificacoes` | 3003 | E-mails (simulados) e mensagens internas | `notificacoes-db` (5435) |
+| `cinebridge-mq` | 5672, 15672 | RabbitMQ com interface de gerenciamento | — |
 
-- **Adapter:** integração com armazenamento em nuvem (S3, Google Cloud, disco local), gateways de pagamento (Stripe, PagSeguro, PayPal) e fontes de profissionais (LinkedIn, Indeed, cadastro interno);
-- **Composite:** projetos descritos como hierarquias de pacotes e serviços, com custo, prazo e validação recursivos;
-- **Decorator:** cache, auditoria e compressão sobre a recomendação, combinados em tempo de execução.
+![Diagrama de implantação](docs/diagrama-implantacao.png)
 
-Análise e decisões: [docs/atv3.md](docs/atv3.md).
+Os serviços não chamam uns aos outros por HTTP. O recomendador consulta profissionais e projetos por filas RPC (`consulta-profissionais`, `consulta-projetos`) e publica seus eventos em `eventos-recomendacoes`; o serviço de projetos publica o ciclo de vida em `eventos-projetos`, consumida pelas notificações. Arquitetura, contratos das filas, garantias de entrega e decisões: **[docs/atv4.md](docs/atv4.md)**.
 
-O sistema considera competências, disponibilidade, localização e orçamento para sugerir uma equipe. O produtor pode aceitar as sugestões ou substituir integrantes, e cada profissional responde ao seu convite. A equipe só fica confirmada após os aceites necessários.
+## Requisitos
 
-## Tecnologias
-
-| Tecnologia | Uso |
+| Sistema | Instalação |
 |---|---|
-| Node.js 24 | Execução dos arquivos TypeScript diretamente |
-| TypeScript | Tipagem estática, verificada com `tsc --noEmit` |
-| Fastify 5 | API HTTP e validação dos corpos das requisições |
-| TypeORM 0.3 | Persistência com EntitySchema e migrações |
-| PostgreSQL | Dados dos projetos, equipes, convites e eventos |
-| EventEmitter | Distribuição de eventos para os observadores |
-| node:test e c8 | Testes automatizados e cobertura |
-| node:zlib, node:fs | Compressão gzip e armazenamento local portável |
+| **Windows 10 ou superior** | [Docker Desktop](https://docs.docker.com/desktop/setup/install/windows-install/) com backend WSL 2. Inclui Docker Engine, Docker Compose e interface gráfica |
+| **Ubuntu 24.04.3 ou superior** (e derivadas) | [Docker Engine](https://docs.docker.com/engine/install/ubuntu/) com o plugin Compose: `sudo apt install docker-ce docker-ce-cli containerd.io docker-compose-plugin` (após adicionar o repositório oficial do Docker) |
 
-A aplicação é um único serviço. O worker de eventos executa no mesmo processo da API. Não há interface gráfica ou menu interativo; os scripts de demonstração fazem requisições HTTP.
+Verifique a instalação:
+
+```sh
+docker --version
+docker compose version     # ou: docker-compose --version
+```
+
+Para rodar a demonstração ponta a ponta no host também é preciso **Node.js 18 ou superior** (o script não tem dependências). Para desenvolver e testar os serviços fora do Docker, **Node.js 24**.
 
 ## Como executar
 
-É necessário ter **Node.js 24.12 ou superior, dentro da versão 24**, npm e PostgreSQL. O arquivo Compose utiliza PostgreSQL 18.6; Docker com Compose é opcional para quem já tem o banco instalado.
-
-**Plataformas:** Windows 10 ou superior e Ubuntu 24.04.3 ou superior, incluindo distribuições derivadas. As dependências são JavaScript puro, sem compilação nativa, e os caminhos de arquivo são portáveis. No Ubuntu, o Node.js do repositório `apt` padrão é anterior à versão 24; instale a versão 24 pelo [instalador oficial](https://nodejs.org/pt/download) (nvm ou NodeSource). Validado em Windows 11 e Ubuntu 26.04; veja [docs/validacao.md](docs/validacao.md).
-
-### 1. Clonar e instalar
-
 ```sh
-git clone https://github.com/joaoCavalcante377/ATVIII-Cinebridge.git
-cd ATVIII-Cinebridge
-npm ci
+git clone https://github.com/joaoCavalcante377/ATVIV-Cinebridge.git
+cd ATVIV-Cinebridge
+docker compose up -d --build
 ```
 
-### 2. Configurar o ambiente
+Na primeira vez as imagens são construídas e baixadas (alguns minutos). Os serviços só iniciam depois que seus bancos e o RabbitMQ ficam saudáveis. Acompanhe:
+
+```sh
+docker compose ps          # todos devem ficar "healthy"
+docker compose logs -f     # logs de todos os contêineres (Ctrl+C para sair)
+docker compose logs -f cinebridge-notificacoes
+```
+
+O comando `docker-compose up -d` (Compose v1 ou o atalho do Docker Desktop) também funciona.
+
+Com tudo saudável, rode a demonstração ponta a ponta. Ela cria um projeto, passa por convites, recusa, aceites e pagamento, e confere o registro no serviço de projetos, as notificações e o tráfego das filas:
+
+```sh
+node scripts/demo-atv4.mjs
+```
+
+A interface do RabbitMQ fica em **http://localhost:15672** (usuário `guest`, senha `guest`): filas, taxas de entrega, consumidores e as filas de falhas (`*.falhas`).
+
+Para encerrar:
+
+```sh
+docker compose down        # para e remove os contêineres; os dados ficam nos volumes
+docker compose down -v     # também apaga os volumes (bancos e filas)
+```
+
+## Rotas
+
+Todas as rotas usam JSON. Valores monetários em **centavos**, datas `AAAA-MM-DD`.
+
+### cinebridge-api — http://localhost:3000
+
+As rotas da ATVIII continuam disponíveis ([referência completa](services/api/docs/api.md)). As principais:
+
+| Método | Rota | Operação |
+|---|---|---|
+| GET | `/health` | Banco e RabbitMQ operacionais (200) ou 503 |
+| POST | `/projetos` | Criar projeto e recomendar equipe (profissionais via `consulta-profissionais`) |
+| POST | `/projetos/modelos/:nome` | Criar a partir de um modelo (`padrao`, `documentario`, `animacao`, `publicitario`) |
+| GET | `/projetos/:id` | Projeto, equipe, recomendação e convites |
+| GET | `/projetos/:id/acompanhamento` | Registro no serviço de projetos (via `consulta-projetos`) |
+| POST | `/projetos/:id/aceitar` | Aceitar sugestões e emitir convites |
+| POST | `/projetos/:id/convites/:conviteId/resposta` | Profissional aceita ou recusa |
+| POST | `/projetos/:id/membros/:papel/substituir` | Substituir integrante |
+| POST | `/projetos/:id/reavaliar` | Alterar critérios e recalcular |
+| POST | `/projetos/:id/pagamentos` | Pagar a equipe confirmada (finaliza o projeto) |
+| POST | `/profissionais/:id/avaliacoes` | Avaliar profissional (encaminhado pela fila) |
+| GET | `/projetos/:id/relatorio`, `/servicos`, `/auditoria` | Relatório, pacotes de serviços e auditoria |
+
+### cinebridge-profissionais — http://localhost:3001
+
+| Método | Rota | Operação |
+|---|---|---|
+| GET | `/health` | Banco e RabbitMQ |
+| POST | `/profissionais` | Cadastrar profissional |
+| GET | `/profissionais?papel=&localizacao=&inicio=&fim=&limite=` | Listar com filtros |
+| GET | `/profissionais/:id` | Detalhar |
+| POST | `/profissionais/:id/avaliacoes` | Registrar avaliação |
+
+Na inicialização são cadastrados os **27 profissionais fictícios** do seed das atividades anteriores (somente os que ainda não existem; `SEED=false` desativa).
+
+### cinebridge-projetos — http://localhost:3002
+
+| Método | Rota | Operação |
+|---|---|---|
+| GET | `/health` | Banco e RabbitMQ |
+| GET | `/projetos?status=` | Listar (`CRIADO`, `EM_ANDAMENTO`, `EQUIPE_CONFIRMADA`, `FINALIZADO`) |
+| GET | `/projetos/:id` | Status, configuração, métricas e resultados |
+| POST | `/projetos` | Cadastro manual `{ titulo, tipoProjeto?, dados? }` |
+| PATCH | `/projetos/:id` | Alterar título ou configuração |
+| POST | `/projetos/:id/finalizar` | Finalizar `{ resumo? }` |
+
+Os projetos criados no recomendador aparecem aqui automaticamente, pelos eventos. Toda mudança publica `projeto.criado`, `projeto.atualizado` ou `projeto.finalizado` em `eventos-projetos`.
+
+### cinebridge-notificacoes — http://localhost:3003
+
+| Método | Rota | Operação |
+|---|---|---|
+| GET | `/health` | Banco, RabbitMQ e observadores assinantes |
+| GET | `/notificacoes?projetoId=&destinatario=&canal=&limite=` | Listar (`canal`: `email` ou `interno`) |
+| GET | `/notificacoes/:id` | Detalhar |
+
+## Exemplo rápido
+
+No Linux ou no Git Bash:
+
+```sh
+curl -s -X POST localhost:3000/projetos -H 'content-type: application/json' -d @services/api/examples/projeto.json
+# use o "id" de "projeto" na resposta:
+curl -s localhost:3002/projetos/ID_DO_PROJETO
+curl -s "localhost:3003/notificacoes?projetoId=ID_DO_PROJETO"
+```
 
 No PowerShell:
 
 ```powershell
-Copy-Item .env.example .env
+$estado = Invoke-RestMethod -Method Post -Uri http://localhost:3000/projetos -ContentType 'application/json' -InFile services/api/examples/projeto.json
+$id = $estado.projeto.id
+Invoke-RestMethod http://localhost:3002/projetos/$id
+Invoke-RestMethod "http://localhost:3003/notificacoes?projetoId=$id"
 ```
 
-No Linux:
+O registro em projetos e as notificações chegam alguns milissegundos depois da resposta do recomendador (comunicação assíncrona).
 
-```sh
-cp .env.example .env
-```
+## Configuração
 
-O arquivo de exemplo contém:
+Cada serviço tem seu arquivo de variáveis para o Compose (`services/<serviço>/docker.env`) e um `.env.example` para execução fora do Docker. As credenciais são de desenvolvimento local.
+
+| Variável | Serviços | Finalidade |
+|---|---|---|
+| `DATABASE_URL` | todos | PostgreSQL do próprio serviço (no Compose, pelo nome do contêiner, por exemplo `profissionais-db`) |
+| `AMQP_URL` | todos | RabbitMQ, `amqp://guest:guest@cinebridge-mq:5672` |
+| `PORT`, `HOST` | todos | Porta e endereço de escuta (`0.0.0.0` no contêiner) |
+| `DB_MIGRAR` | api | Aplica as migrações TypeORM ao iniciar |
+| `SEED` | profissionais | Cadastra os profissionais fictícios (`true` por padrão) |
+| `CANAIS` | notificações | Observadores assinantes: `email,interno` |
+| `ARMAZENAMENTO`, `PAGAMENTO`, `RECOMENDACAO_DECORADORES` | api | Provedores e decoradores da ATVIII |
+
+As portas publicadas no host podem ser trocadas sem editar o Compose, por variáveis de ambiente ou por um arquivo `.env` na raiz: `API_PORTA`, `PROFISSIONAIS_PORTA`, `PROJETOS_PORTA`, `NOTIFICACOES_PORTA`, `PROFISSIONAIS_DB_PORTA`, `PROJETOS_DB_PORTA`, `RECOMENDACOES_DB_PORTA`, `NOTIFICACOES_DB_PORTA`, `MQ_PORTA`, `MQ_GERENCIAMENTO_PORTA`. Exemplo de `.env`:
 
 ```dotenv
-DATABASE_URL=postgres://cinebridge:cinebridge@127.0.0.1:54329/cinebridge
-TEST_DATABASE_URL=postgres://cinebridge:cinebridge@127.0.0.1:54329/cinebridge_test
-HOST=127.0.0.1
-PORT=3000
-ARMAZENAMENTO=local
-ARMAZENAMENTO_DIR=.local/arquivos
-PAGAMENTO=stripe
-RECOMENDACAO_DECORADORES=cache,auditoria
+PROFISSIONAIS_DB_PORTA=55432
 ```
 
-| Variável | Finalidade |
-|---|---|
-| `DATABASE_URL` | Conexão da aplicação com PostgreSQL |
-| `TEST_DATABASE_URL` | Conexão usada pelos testes de integração e carga |
-| `HOST` | Endereço de escuta da API; padrão `127.0.0.1` |
-| `PORT` | Porta HTTP; padrão `3000` |
-| `ARMAZENAMENTO` | `local` (disco, padrão), `s3` ou `gcs` (simulados em memória) |
-| `ARMAZENAMENTO_DIR` | Pasta dos arquivos no modo `local`; padrão `.local/arquivos` |
-| `ARMAZENAMENTO_BUCKET` | Bucket simulado de `s3`/`gcs`; padrão `cinebridge-midias` |
-| `PAGAMENTO` | Gateway simulado: `stripe` (padrão), `pagseguro` ou `paypal` |
-| `RECOMENDACAO_DECORADORES` | Pilha inicial, do mais interno ao mais externo; padrão `cache,auditoria`. Vazio desativa |
+## Testes
 
-As credenciais acima correspondem ao ambiente local do Compose. Se usar outra instalação, ajuste usuário, senha, host e porta nas URLs.
-
-### 3. Iniciar o PostgreSQL
-
-Com Docker:
+Com Node.js 24:
 
 ```sh
-docker compose up -d --wait
+npm run instalar        # npm ci em cada serviço
+npm test                # cópias da mensageria idênticas + testes dos 4 serviços
+npm run typecheck
 ```
 
-O Compose publica a porta **54329** da máquina para a **5432** do contêiner. Na primeira inicialização de um volume vazio, cria os bancos `cinebridge` e `cinebridge_test`. Os registros permanecem no volume `cinebridge_pg` ao parar e iniciar o contêiner.
-
-Sem Docker, crie os dois bancos na sua instalação e configure o `.env`. O usuário da conexão precisa poder criar tabelas e executar migrações; os testes também criam schemas isolados.
-
-### 4. Aplicar as migrações e iniciar a API
+Os testes de integração do recomendador usam PostgreSQL e RabbitMQ reais. Com a stack no ar, por exemplo:
 
 ```sh
-npm run db:migrate
-npm run db:seed
-npm start
+cd services/api
+docker compose -f ../../docker-compose.yml exec recomendacoes-db createdb -U cinebridge cinebridge_test
+TEST_DATABASE_URL=postgres://cinebridge:cinebridge@127.0.0.1:5434/cinebridge_test \
+TEST_AMQP_URL=amqp://guest:guest@127.0.0.1:5672 npm run test:coverage
 ```
 
-O seed cadastra **27 profissionais fictícios** para demonstração. Pode ser repetido: atualiza os mesmos IDs. É opcional se você for cadastrar os profissionais pela API.
+O teste da mensageria cria e remove um vhost temporário, sem interferir nas filas da stack. Resultados e cenários de falha validados: [docs/atv4.md](docs/atv4.md#validação).
 
-A API fica em **http://localhost:3000**. Verifique `GET /health` e `GET /ready`. Não existe página inicial em `/`; essa rota retorna 404. Mantenha o terminal aberto e use `Ctrl+C` para encerrar. Para reiniciar automaticamente ao editar o código:
-
-```sh
-npm run dev
-```
-
-Para trocar a porta, altere `PORT` no `.env` antes de iniciar a aplicação.
-
-## Banco de dados
-
-O schema é criado por migrações, não por sincronização automática do ORM.
-
-| Tabela | Conteúdo |
-|---|---|
-| `profissionais` | Cadastro, papéis, preço, disponibilidade e histórico |
-| `competencias` | Competências e níveis dos profissionais |
-| `avaliacoes` | Notas e comentários recebidos |
-| `projetos` | Critérios, família, especificações, hierarquia de serviços, preferências e versão |
-| `equipes` | Equipe atual, custo, estado e papéis pendentes |
-| `membros_equipe` | Profissionais alocados e seus aceites |
-| `recomendacoes` | Histórico dos rankings e avisos |
-| `convites` | Convites e respostas dos profissionais |
-| `outbox_eventos` | Eventos pendentes, entregues ou falhos |
-| `notificacoes` | Notificações internas e registros locais de e-mail |
-| `auditoria` | Registro dos eventos processados |
-
-O TypeORM também mantém a tabela de controle das migrações. Há chaves estrangeiras, restrições de unicidade e transações para manter os dados relacionados consistentes. Campos estruturados, como especificações e rankings, usam JSONB.
-
-**Banco da ATVI ou da ATVII:** basta executar `npm run db:migrate`. As migrações adicionam `tipoProjeto` e `especificacoes` (ATVII) e `servicos` e `preferencias` (ATVIII), todas opcionais, sem apagar registros. Projetos antigos continuam usando o comportamento anterior.
-
-## Rotas
-
-URL base: `http://localhost:3000`. Envie os corpos como JSON, com `Content-Type: application/json`. Substitua `:id` e `:conviteId` pelos UUIDs retornados pela API.
-
-| Método | Rota | Operação |
-|---|---|---|
-| GET | `/health` | Verificar se a API responde |
-| GET | `/ready` | Verificar o banco e consultar o estado dos eventos |
-| POST | `/profissionais` | Cadastrar profissional |
-| POST | `/projetos` | Criar projeto e recomendar equipe |
-| GET | `/projetos/:id` | Consultar projeto, equipe, recomendação e convites |
-| GET | `/prototipos` | Listar os modelos disponíveis |
-| POST | `/projetos/modelos/:nome` | Criar projeto a partir de um modelo, com ajustes |
-| POST | `/projetos/:id/clonar` | Criar outro projeto a partir de um existente |
-| POST | `/projetos/:id/aceitar` | Aceitar sugestões e emitir convites |
-| POST | `/projetos/:id/membros/:papel/substituir` | Substituir um integrante |
-| POST | `/projetos/:id/convites/:conviteId/resposta` | Aceitar ou recusar um convite |
-| POST | `/projetos/:id/reavaliar` | Alterar critérios permitidos e recalcular a equipe |
-| GET | `/projetos/:id/relatorio` | Consultar relatório, inconsistências e compatibilidade |
-| GET | `/projetos/:id/notificacoes` | Consultar notificações registradas |
-| GET | `/projetos/:id/auditoria` | Consultar eventos auditados |
-| GET | `/projetos/:id/servicos` | Custo, prazo, validação e árvore de serviços (Composite) |
-| POST | `/projetos/:id/arquivos` | Anexar roteiro, storyboard ou amostra (Adapter) |
-| GET | `/projetos/:id/arquivos` | Listar arquivos do projeto |
-| GET | `/projetos/:id/arquivos/conteudo?arquivoId=` | Baixar um arquivo |
-| POST | `/projetos/:id/pagamentos` | Pagar a equipe confirmada (Adapter) |
-| GET | `/pagamentos/:transacaoId` | Consultar status de pagamento |
-| POST | `/profissionais/:id/avaliacoes` | Registrar avaliação pela fonte configurada (Adapter) |
-| GET | `/recomendador` | Política, provedores e métricas dos decoradores |
-| PUT | `/recomendador/politica` | Alterar a pilha de decoradores em execução (Decorator) |
-
-Não há rotas de listagem geral de projetos/profissionais, exclusão ou edição genérica. Guarde os IDs retornados nas criações.
-
-## Exemplos de uso
-
-Os valores monetários são **centavos**: `300000` representa R$ 3.000,00. Datas usam `AAAA-MM-DD`; o período inclui início e fim. A duração do projeto é em minutos.
-
-### Cadastrar profissional — POST /profissionais
-
-```json
-{
-  "nome": "Ana Silva",
-  "email": "ana@example.com",
-  "papeis": ["EDITOR"],
-  "competencias": [{"nome": "Blender", "nivel": 5}],
-  "precoCentavos": 50000,
-  "disponibilidade": {"inicio": "2027-03-01", "fim": "2027-03-30"},
-  "localizacao": "São Paulo",
-  "historico": [],
-  "avaliacoes": []
-}
-```
-
-Os níveis de competências e as notas variam de 0 a 5. O servidor gera o ID.
-
-### Criar a partir de modelo — POST /projetos/modelos/animacao
-
-```json
-{
-  "titulo": "Uma pequena viagem",
-  "orcamentoCentavos": 300000,
-  "inicio": "2027-03-01",
-  "prazo": "2027-03-30",
-  "especificacoes": {
-    "tecnica": "3d",
-    "software": "Blender",
-    "horasRenderDisponiveis": 100
-  }
-}
-```
-
-Os demais campos vêm do modelo, incluindo os papéis necessários. O retorno 201 contém `projeto`, `equipe`, `recomendacao`, `convites`, `excluidos` e `versao`. Sem profissionais elegíveis, a criação pode retornar uma equipe parcial com os motivos.
-
-Para criar diretamente por `POST /projetos`, use os exemplos completos:
-
-- [Projeto padrão](examples/projeto.json)
-- [Documentário](examples/projeto-documentario.json)
-- [Animação](examples/projeto-animacao.json)
-- [Publicidade](examples/projeto-publicitario.json)
-- [Pacotes de serviços (ATVIII)](examples/projeto-servicos.json)
-
-### Projeto por pacotes de serviços — POST /projetos
-
-Em vez de `papeis`, envie `servicos` com a hierarquia. Os papéis da recomendação são derivados das folhas:
-
-```json
-{
-  "titulo": "Curta com pós-produção", "genero": "drama", "duracaoMinutos": 15, "orcamentoCentavos": 900000,
-  "inicio": "2027-03-01", "prazo": "2027-03-30", "tipoCaptacao": "ficcao", "localizacao": "São Paulo", "estrategia": "cosseno",
-  "preferencias": {"decoradores": ["cache", "auditoria"]},
-  "servicos": {"tipo": "pacote", "nome": "Pós-produção", "execucao": "paralela", "servicos": [
-    {"tipo": "atomico", "nome": "Edição", "custoCentavos": 40000, "prazoDias": 6, "papel": "EDITOR"},
-    {"tipo": "atomico", "nome": "Mixagem", "custoCentavos": 25000, "prazoDias": 5, "papel": "SONOPLASTA"}
-  ]}
-}
-```
-
-Pacotes `sequencial` somam os prazos; `paralela` usa o maior. Regras completas em [docs/api.md](docs/api.md#pacotes-de-serviços-atviii).
-
-### Aceitar sugestões — POST /projetos/:id/aceitar
-
-```json
-{}
-```
-
-Aceita todos os membros sugeridos. Para selecionar apenas alguns papéis, envie `{"papeis":["EDITOR"]}`. O retorno contém os convites criados; o aceite do produtor ainda não confirma o profissional.
-
-### Responder convite — POST /projetos/:id/convites/:conviteId/resposta
-
-```json
-{
-  "profissionalId": "UUID_DO_PROFISSIONAL",
-  "resposta": "ACEITO"
-}
-```
-
-Substitua o texto pelo UUID real do destinatário. Use `RECUSADO` para recusar. A recusa busca outra opção somente para aquele papel; o produtor precisa aceitar a nova sugestão.
-
-### Substituir integrante — POST /projetos/:id/membros/EDITOR/substituir
-
-Envie `{}` para buscar outra opção automaticamente, ou `{"profissionalId":"UUID_DO_PROFISSIONAL"}` para indicar alguém cadastrado. Os demais integrantes e seus aceites são preservados. Uma indicação que viole as restrições retorna 422.
-
-### Reavaliar — POST /projetos/:id/reavaliar
-
-```json
-{
-  "orcamentoCentavos": 350000,
-  "estrategia": "orcamento"
-}
-```
-
-Permite alterar orçamento, início, prazo, estratégia, parâmetros e especificações. Cancela os convites ativos e exige novos aceites. `{}` recalcula com os mesmos critérios.
-
-### Clonar — POST /projetos/:id/clonar
-
-```json
-{
-  "titulo": "Uma pequena viagem — versão 2",
-  "orcamentoCentavos": 400000
-}
-```
-
-Cria uma cópia independente, com novo ID e equipe recalculada. Não transfere convites, confirmações ou exclusões da origem. Permite ajustar os dados de produção, mas não trocar `tipoProjeto` ou escolher o ID. Objetos de especificações e parâmetros são mesclados; arrays informados substituem os anteriores.
-
-## Famílias, estratégias e estados
-
-| Família (`tipoProjeto`) | Características |
-|---|---|
-| `padrao` | Mantém o fluxo da ATVI; também é usado quando o campo é omitido |
-| `documentario` | Tema, entrevistados, autorizações e competências de entrevista/captação |
-| `animacao` | Técnica, software, capacidade e estimativa de renderização |
-| `publicitario` | Cliente, produto, público, canais e limite de duração do briefing |
-
-`tipoProjeto` identifica a família; `tipoCaptacao` aceita `documentario`, `ficcao` ou `animacao`. São campos diferentes. Para instanciar o modelo de documentário, preencha os entrevistados e confirme as autorizações em `especificacoes`. As regras completas estão em [docs/atv2.md](docs/atv2.md).
-
-As estratégias disponíveis são `cosseno`, `colaborativa` e `orcamento`. A família acrescenta critérios especializados à pontuação. A reserva de produção, quando informada, é descontada do orçamento destinado à equipe.
-
-Os papéis são `DIRETOR`, `DIRETOR_FOTOGRAFIA`, `SONOPLASTA`, `EDITOR`, `ROTEIRISTA` e `EFEITOS_VISUAIS`.
-
-| Estado da equipe | Significado |
-|---|---|
-| `PARCIAL` | Há papéis sem profissional elegível dentro das restrições |
-| `SUGERIDA` | Equipe completa, aguardando aceite do produtor |
-| `AGUARDANDO` | Há convites emitidos e falta concluir os aceites |
-| `CONFIRMADA` | Todos os integrantes receberam aceite do produtor e aceitaram seus convites |
-
-## Eventos e notificações
-
-As alterações e seus eventos são persistidos na mesma transação. Após o commit, o worker lê a outbox e aciona os observadores, com acompanhamento das promises, timeout e novas tentativas em caso de falha. As notificações são idempotentes para evitar duplicação na reentrega.
-
-Por isso, notificações e auditoria podem aparecer depois da resposta HTTP da operação. O worker normalmente inicia uma nova rodada em até 200 ms. Eventos persistidos sobrevivem ao reinício da aplicação.
-
-O canal de e-mail é **um registro local**, sem envio SMTP. Os provedores de nuvem, pagamento e cadastro externo são **simulações** com o vocabulário de cada serviço, sem rede nem credenciais. Não há autenticação nem reserva global de agenda. O `profissionalId` na resposta de convite verifica o destinatário, mas não autentica o usuário.
-
-## Respostas HTTP
-
-| Código | Significado |
-|---|---|
-| 200 | Consulta ou operação concluída |
-| 201 | Profissional ou projeto criado |
-| 400 | Formato, tipo, campo ou parâmetro inválido |
-| 403 | Profissional informado não é o destinatário do convite |
-| 404 | Projeto, convite, modelo ou rota inexistente |
-| 409 | Conflito de registro ou convite já respondido/cancelado |
-| 413 | Corpo da requisição acima de 256 KiB (36 MiB no envio de arquivos) |
-| 422 | Violação de regra de domínio ou integridade |
-| 502 | Provedor externo recusou a operação |
-| 503 | Banco, cadastro ou provedor externo indisponível |
-| 500 | Falha inesperada, registrada no log |
-
-Orçamento insuficiente para preencher todos os papéis pode gerar equipe parcial, em vez de erro. A API fornece os motivos no resultado.
-
-## Arquitetura e padrões
-
-| Padrão | Aplicação |
-|---|---|
-| Strategy | Algoritmos de recomendação intercambiáveis |
-| Template Method | Sequência de formação da equipe no orquestrador |
-| Observer | Notificações e auditoria dos eventos |
-| Visitor | Validação, compatibilidade e relatórios |
-| Prototype | Clonagem profunda e registro de modelos |
-| Factory Method | Subclasses de projeto selecionam sua fábrica |
-| Abstract Factory | Criação dos componentes compatíveis de cada família |
-| Adapter | Interfaces de armazenamento, pagamento e profissionais, com três provedores cada |
-| Composite | `ServicoProjeto`, `ServicoAtomico` e `PacoteServico`; `Projeto.servicoPrincipal` |
-| Decorator | `CacheDecorator`, `AuditoriaDecorator` e `CompressaoDecorator` sobre `RecomendacaoStrategy` |
+## Estrutura
 
 ```text
-src/
-  domain/          Entidades, regras, padrões e algoritmos
-  application/     Casos de uso, catálogo e seleção de fábricas
-  http/            Rotas e schemas de validação
-  infrastructure/  TypeORM, migrações, barramento, worker, sistemas externos simulados e adaptadores
-scripts/           Migrações, seed, demonstrações e avaliação
-test/              Testes de domínio, aplicação e integração
-examples/          Corpos JSON para criação de projetos
-docs/              Análise, diagrama, API e resultados de validação
+docker-compose.yml        Orquestração: 4 serviços, 4 bancos, RabbitMQ, rede cinebridge-net
+services/
+  api/                    cinebridge-api: recomendador das ATVI–ATVIII + adaptador e publicador RabbitMQ
+  profissionais/          cinebridge-profissionais
+  projetos/               cinebridge-projetos
+  notificacoes/           cinebridge-notificacoes
+    Dockerfile, .dockerignore, docker.env, .env.example, src/, test/
+scripts/
+  demo-atv4.mjs           Demonstração e verificação ponta a ponta
+  verificar-mensageria.mjs
+docs/
+  atv4.md                 Arquitetura, filas, garantias e decisões da ATVIV
+  diagrama-implantacao.*  Diagrama de implantação (PNG do enunciado e PlantUML)
 ```
 
-## Testes e demonstrações
-
-| Comando | Finalidade |
-|---|---|
-| `npm run typecheck` | Conferir a tipagem sem gerar JavaScript |
-| `npm test` | Executar testes que não dependem de PostgreSQL |
-| `npm run test:integration` | Executar testes com PostgreSQL real |
-| `npm run test:coverage` | Executar a suíte completa e gerar cobertura |
-| `npm run demo` | Demonstrar o fluxo da ATVI por HTTP |
-| `npm run demo:familias` | Demonstrar famílias, clones, relatórios e notificações |
-| `npm run demo:atv3` | Demonstrar Adapter, Composite e Decorator sem banco nem servidor |
-| `npm run demo:atv3:http` | Demonstrar serviços, arquivos, pagamentos e métricas por HTTP |
-| `npm run test:load` | Medir requisições concorrentes com PostgreSQL |
-| `npm run evaluate` | Calcular métricas sobre uma fixture sintética |
-
-Integração, cobertura e carga exigem `TEST_DATABASE_URL` e o PostgreSQL disponível. As demonstrações HTTP exigem a API em execução e os dados do seed; `demo:atv3` roda sozinha. Rode-as em outro terminal. Se mudar a porta, configure a variável `BASE_URL` nesse terminal; no PowerShell:
-
-```powershell
-$env:BASE_URL = "http://127.0.0.1:3001"
-npm run demo:familias
-```
-
-Em **01/11/2026**, os **120 testes passaram** com PostgreSQL 18.6, no Ubuntu (WSL2) e no Windows 11 nativo, com **98,09% de cobertura de linhas**. O relatório HTML é gerado em `coverage/index.html`. Detalhes, carga e limites da medição: [docs/validacao.md](docs/validacao.md).
+A documentação das atividades anteriores está em [services/api/README.md](services/api/README.md) e [services/api/docs](services/api/docs).
 
 ## Problemas comuns
 
-- **ECONNREFUSED na porta 54329:** confirme que o PostgreSQL terminou de iniciar e que a URL corresponde à porta configurada. Com Docker, consulte `docker compose ps` e `docker compose logs postgres`.
-- **Tabela não encontrada:** execute `npm run db:migrate` no banco configurado.
-- **Banco cinebridge_test não existe:** o script de inicialização do Compose só roda em volume vazio. Em um volume anterior, crie o banco de testes na instalação existente.
-- **Porta 3000 ocupada:** encerre a outra instância ou altere `PORT` no `.env`.
-- **404 ao abrir localhost:3000:** use uma rota existente, como `/health`; a aplicação não oferece página inicial.
-
-## Documentação complementar
-
-- [Uso detalhado da API](docs/api.md)
-- [Análise de anti-padrões e implementação da ATVIII](docs/atv3.md)
-- [Análise e implementação da ATVII](docs/atv2.md)
-- [Algoritmos de recomendação](docs/algoritmos.md)
-- [Diagrama de classes em PlantUML](docs/diagrama.puml)
-- [Validação e resultados dos testes](docs/validacao.md)
+- **`Bind for 0.0.0.0:5432 failed: port is already allocated`:** outro PostgreSQL (local ou em contêiner) já usa a porta. Defina outra porta no host, por exemplo `PROFISSIONAIS_DB_PORTA=55432` em um `.env` na raiz, e rode `docker compose up -d` de novo. Vale para as demais portas.
+- **`docker: command not found` no WSL:** ative a integração com a distribuição em Docker Desktop → Settings → Resources → WSL integration.
+- **`failed to connect to the docker API`:** o Docker Desktop (ou o serviço `docker` no Linux) não está em execução. No Ubuntu, sem `sudo`, adicione seu usuário ao grupo `docker`.
+- **Serviço `unhealthy`:** veja `docker compose logs <serviço>`. O `/health` informa se o problema é o banco ou o RabbitMQ.
+- **`/projetos/:id/acompanhamento` retorna 404 logo após criar:** o registro chega de forma assíncrona; tente de novo em instantes.
+- **Recomendação `degradada`:** o serviço de profissionais não respondeu em 2,5 s (por exemplo, ainda iniciando). Confira `docker compose ps`.

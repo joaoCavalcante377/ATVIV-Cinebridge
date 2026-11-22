@@ -1,0 +1,26 @@
+{
+  "name": "cinebridge-notificacoes",
+  "version": "4.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Envio de notificações da Cinebridge (e-mail simulado e mensagens internas); consome eventos-projetos",
+  "engines": {
+    "node": ">=24.12.0 <25"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/main.ts",
+    "dev": "node --env-file-if-exists=.env --watch src/main.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.ts"
+  },
+  "dependencies": {
+    "amqplib": "^2.4.0",
+    "fastify": "^5.12.8",
+    "pg": "^8.23.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "@types/pg": "^8.23.1",
+    "typescript": "~5.9.3"
+  }
+}
